@@ -1,0 +1,13 @@
+Django==4.0.3
+djangorestframework
+django-cors-headers
+djangorestframework-simplejwt
+psycopg2-binary
+pandas
+openpyxl
+xlsxwriter
+requests
+Jinja2
+xhtml2pdf
+Office365-REST-Python-Client
+reportlab
