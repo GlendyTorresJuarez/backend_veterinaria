@@ -85,10 +85,12 @@ urlpatterns = [
 
     #-------------------------- USUARIOS ------------------------------------
     path('lista-usuario/' , ListarUsuario , name="lista_usuario"),
+    path('lista-usuario-id/<str:dni>/' , ListarUsuarioId , name="lista_usuario"),
     path('agregar-usuario/' , AgregarUsuario , name="agregar_usuario"),
     path('actualizar-usuario/<int:pk>/' , ActualizarUsuario , name="actualizar_usuario"),
     path('recuperar-eliminar-usuario/<int:pk>/' , UsuarioEliminacionFisicaLogica , name="recuperar_eliminar_usuario"),
-
+    path('reset-password/' , ResetPassword , name="reset_password"),
+    path('actualizar-perfil/<str:id>/' ,  ActualizarPerfil , name="actualizar_perfil"),
     #--------------------------'TIPOS DE USUARIOS ------------------------------------
     path('lista-tipo-usuario/' , ListarTipoUsuario , name="lista_tipo-usuario"),
 
@@ -108,5 +110,8 @@ urlpatterns = [
 
     #------------------------HISTORIAL CLINICO--------------------------------
     path('reporte-historial-clinico/' , ReporteHistorialClinico , name="reporte_historial_clinico"),
+
+    #------------------------TIEMPO ESTIMADO DE REGISTRO-------------------------------------------
+    path('total-tiempo-registro/' , TotalTiemposReg , name="total_tiempo_registro"),
 
 ]

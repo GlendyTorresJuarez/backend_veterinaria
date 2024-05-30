@@ -10,7 +10,7 @@ from .serializers import *
 from django.db import connections
 import requests
 from django.db.models import Q
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.contrib.auth.hashers import make_password
 from rest_framework_simplejwt.views import TokenObtainPairView
 
@@ -25,7 +25,12 @@ from django.conf import settings
 import os
 from django.template.defaultfilters import date
 from reportlab.lib.pagesizes import letter
-
+from django.core.mail import EmailMultiAlternatives, get_connection
+from django.conf import settings
+from django.template.loader import render_to_string
+import secrets
+import string
+import random
 
 
 @api_view(['POST'])
@@ -255,10 +260,10 @@ def ExportarServicios(request):
         
         if listaServicio['is_error'] == False and len(listaServicio['data']) != 0:
             df = pd.DataFrame(listaServicio['data'])
-            df = df.drop(columns = ['id' , 'key_estado', 'nombre', 'color' , 'icon'])
-            df.columns = ['SERVICIOS' , 'DESCRIPCIÓN' , 'PRECIOS' , "TIPO SERVICIOS"]
+            df = df.drop(columns = ['id' , 'key_estado', 'nombre', 'color' , 'icon' , 'key_tipo_servicios'])
+            df.columns = ['SERVICIOS' , 'DESCRIPCIÓN' , 'PRECIOS' ,'DURACION' , "TIPO SERVICIOS"]
         else: 
-            columnsServicios = [{'SERVICIOS' : '' , 'DESCRIPCIÓN': '', 'PRECIOS' : '' , "TIPO SERVICIOS" : ''}]
+            columnsServicios = [{'SERVICIOS' : '' , 'DESCRIPCIÓN': '', 'PRECIOS' : '' , 'DURACION' : '' , "TIPO SERVICIOS" : ''}]
             df = pd.DataFrame(columnsServicios)
 
         crearExcel = CreateExcel(df , 'A1:C1', 'servicios')
@@ -267,6 +272,7 @@ def ExportarServicios(request):
             contexto = crearExcel['result']
             return contexto
     except Exception as error:
+        print(error)
         return Response({"is_error": True, "message" : str(error)} ,  status= status.HTTP_200_OK) 
     
 ##--------------------CREACIÓN DEL ARCHIVO EXCEL ---------------------
@@ -685,6 +691,33 @@ def TotalClientesNuevos(request):
             SELECT 
                 * 
             FROM fin_clientes_nuevos_2('{tipo}' , '{fechaInicio}' ,  '{fechaFin}')
+                """
+        
+        with connections['default'].cursor() as cursor:
+            cursor.execute(query)
+            resultado = ConvertirQueryADiccionarioDato(cursor)
+            isError = False
+            data = resultado
+            message = "Consulta ejecutada con exito"
+
+            return  Response({'is_error': isError , 'data': data , "message": message} , status= status.HTTP_200_OK) 
+    except Exception as error:
+        isError = True
+        data = []
+        message = f"consulta sin exito debido al siguiente problema: {str(error)}"
+
+        return  Response({'is_error': isError , 'data': data , "message": message} , status= status.HTTP_200_OK) 
+
+@api_view(['POST'])
+def TotalTiemposReg(request):
+    try:
+        tipo = request.data['tipo']
+        fechaInicio = request.data['fecha_inicio']
+        fechaFin = request.data['fecha_fin']
+        query = f"""
+                    SELECT 
+                        * 
+                    FROM fin_tiempo_registro('{tipo}' , '{fechaInicio}' ,  '{fechaFin}')
                 """
         
         with connections['default'].cursor() as cursor:
@@ -1363,6 +1396,7 @@ def ConsultarMascota():
             tp.id as key_tipo,
             tp.tipo,
             cl.id as key_cliente,
+            cl.dni,
             CONCAT(cl.apellido , ' ', cl.nombre) as apellido_nombre
             FROM mascota mas
             LEFT JOIN estado es on es.id = mas.key_estado_id
@@ -1400,24 +1434,35 @@ def  ListarMacotas(request):
 def AgregarMascota(request):
     try: 
         if request.method == 'POST':
+            fechaActual = datetime.now().strftime('%Y/%m/%d')
+
+            fechaNacimiento = datetime.strptime(request.data['fecha_nacimiento'] , "%Y-%m-%dT%H:%M:%S.%fZ").strftime('%Y/%m/%d')
+
             isMascota = Mascota.objects.filter(Q(nombre = request.data['nombre']) , Q(key_cliente = request.data['key_cliente']))
+
             if isMascota.count() == 0:
-                mascotaSerializer = MascotaSerializer(data = request.data)
+                if fechaNacimiento <= fechaActual: 
+                    mascotaSerializer = MascotaSerializer(data = request.data)
 
-                if mascotaSerializer.is_valid():
-                    mascotaSerializer.save()
+                    if mascotaSerializer.is_valid():
 
-                    key = mascotaSerializer.data['id']
-                    isError = False
-                    message = "Informacion guarda con exito"
+                        mascotaSerializer.save()
 
-                    descripcion = f"La mascota por nombre {request.data['nombre']} fue registrado con exito"
+                        key = mascotaSerializer.data['id']
+                        isError = False
+                        message = "Informacion guarda con exito"
 
-                    RegistrarHistorial(1 , "mascota",key, request.data['key_usuario'], descripcion)
+                        descripcion = f"La mascota por nombre {request.data['nombre']} fue registrado con exito"
+
+                        RegistrarHistorial(1 , "mascota",key, request.data['key_usuario'], descripcion)
+                    else:
+                        key = 0
+                        isError = True
+                        message = f"error de lectura por lo siguiente: {mascotaSerializer.errors}"
                 else:
                     key = 0
                     isError = True
-                    message = f"error de lectura por lo siguiente: {mascotaSerializer.errors}"
+                    message = "La fecha de nacimiento de la mascota no puede ser mayor a la actual"
             else: 
                 key = 0
                 isError = True
@@ -1786,15 +1831,19 @@ def ReprogramarCita(request , pk = None):
 
 def isValidarHorario(fechaInicio , horaInicio , horaFin, keyVeter):
     fechaHoraInicio = f"{fechaInicio} {horaInicio}"
+    fechaHoraFin = f"{fechaInicio} {horaFin}"
 
     try:
-        query =f"""
-        SELECT COUNT(id) 
-        FROM cita
-        WHERE (
-          ('{fechaHoraInicio}' BETWEEN CONCAT(fecha_inicio, ' ', hora_inicio) AND CONCAT(fecha_inicio, ' ', hora_fin))
-        )
-        AND key_veterinario_id = {keyVeter};
+
+        query = f"""
+        SELECT 
+	        COUNT(id) 
+        FROM 
+        	cita
+        WHERE 
+        	'{fechaHoraInicio}' >= CONCAT(fecha_inicio, ' ', hora_inicio) AND
+        	'{fechaHoraFin}' <= CONCAT(fecha_inicio, ' ', hora_fin) AND
+        	key_veterinario_id = {keyVeter}
         """
 
         with connections['default'].cursor() as cursor:
@@ -1963,27 +2012,118 @@ def ExportarPreguntasFrecuentes(request):
         return Response({"is_error": True, "message" : str(error)} ,  status= status.HTTP_200_OK) 
 
 #---------------------CRUD DE USUARIOS-----------------------
+def IsVerificarUser(nombreCampo , valorCampo):
+    try:
+        query = """
+                SELECT 
+                	id, 
+                	document_number,
+                	last_login,
+                	username, 
+                	first_name, 
+                	last_name, 
+                	email,
+                	status_id
+                FROM 
+                	public.usuario
+                WHERE 
+	                {0} = '{1}'
+        """.format(nombreCampo, valorCampo)
+
+        with connections['default'].cursor() as cursor:
+            cursor.execute(query)
+            result = ConvertirQueryADiccionarioDato(cursor)
+
+            if(len(result) != 0): 
+                isError = False
+                message = "Consulta ejecutada con exito"
+            else:
+                isError = True
+                message = "Sin resultado"
+
+        return {"is_error": isError, "message" : message , "result": result}
+    except Exception as error:
+        return {"is_error": True, "message" : str(error) ,  "result": []}
+    
 def ConsultarUsuarios():
     try:
         query = f"""
                 SELECT
-                us.id,
-                us.document_number,
-                us.first_name as nombre,
-                us.last_name as apellido,
-                us.username as usuario,
-                us.email as correo,
-		        us.date_joined as fecha_registro,
-		        to_char(timezone('America/Lima',  us.last_login), 'DD/MM/YYYY HH24:MI:SS') as ultimo_acceso,
-                es.id as key_estado,
-                es.nombre as estado, 
-                es.color,
-		        tp.id as key_tipo_usuario,
-		        tp.tipo_usuario
-                FROM usuario us 
-                LEFT JOIN estado es on es.id = us.status_id
-		        LEFT JOIN tipo_usuario tp on tp.id = us.user_type_id
+                    us.id,
+                    us.document_number,
+                    us.first_name as nombre,
+                    us.last_name as apellido,
+                    us.username as usuario,
+                    us.email as correo,
+	                us.date_joined as fecha_registro,
+	                to_char(timezone('America/Lima',  us.last_login), 'DD/MM/YYYY HH24:MI:SS') as ultimo_acceso,
+                    COALESCE(cl.sexo, vt.sexo, '') as sexo,
+                    COALESCE(cl.direccion, vt.direccion, '') as direccion,
+                    COALESCE(cl.num_cel, vt.num_cel, '') as num_cel,
+	                es.id as key_estado,
+                    es.nombre as estado, 
+                    es.color,
+	                tp.id as key_tipo_usuario,
+	                tp.tipo_usuario
+                FROM 
+                    usuario us
+                LEFT JOIN 
+                    cliente cl ON us.user_type_id = 3 AND cl.dni = us.document_number
+                LEFT JOIN 
+                    veterinario vt ON us.user_type_id = 2 AND vt.dni = us.document_number
+                LEFT JOIN 
+                	estado es on es.id = us.status_id
+                LEFT JOIN 
+                	tipo_usuario tp on tp.id = us.user_type_id
                 """
+        with connections['default'].cursor() as cursor:
+            cursor.execute(query)
+            resultado = ConvertirQueryADiccionarioDato(cursor)
+            isError = False
+            data = resultado
+            message = "Consulta ejecutada con exito"
+
+            return {'is_error': isError , 'data': data , "message": message}
+    except Exception as error:
+        isError = True
+        data = []
+        message = f"consulta sin exito debido al siguiente problema: {str(error)}"
+
+        return {'is_error': isError , 'data': [] , "message": message}
+
+def consultaUsuarioId(dni):
+    try:
+        query ="""
+                SELECT
+                    us.id,
+                    us.document_number,
+                    us.first_name as nombre,
+                    us.last_name as apellido,
+                    us.username as usuario,
+                    us.email as correo,
+	                us.date_joined as fecha_registro,
+	                to_char(timezone('America/Lima',  us.last_login), 'DD/MM/YYYY HH24:MI:SS') as ultimo_acceso,
+                    COALESCE(cl.sexo, vt.sexo, '') as sexo,
+                    COALESCE(cl.direccion, vt.direccion, '') as direccion,
+                    COALESCE(cl.num_cel, vt.num_cel, '') as num_cel,
+	                es.id as key_estado,
+                    es.nombre as estado, 
+                    es.color,
+	                tp.id as key_tipo_usuario,
+	                tp.tipo_usuario
+                FROM 
+                    usuario us
+                LEFT JOIN 
+                    cliente cl ON us.user_type_id = 3 AND cl.dni = us.document_number
+                LEFT JOIN 
+                    veterinario vt ON us.user_type_id = 2 AND vt.dni = us.document_number
+                LEFT JOIN 
+                	estado es on es.id = us.status_id
+                LEFT JOIN 
+                	tipo_usuario tp on tp.id = us.user_type_id
+                WHERE 
+                    us.document_number = '{0}'
+                """.format(dni)
         
         with connections['default'].cursor() as cursor:
             cursor.execute(query)
@@ -1999,6 +2139,17 @@ def ConsultarUsuarios():
         message = f"consulta sin exito debido al siguiente problema: {str(error)}"
 
         return {'is_error': isError , 'data': [] , "message": message}
+
+
+@api_view(['GET'])
+def ListarUsuarioId(request , dni=None):
+    try:
+        if request.method == 'GET':
+            consulta = consultaUsuarioId(dni)
+    
+            return Response(consulta , status = status.HTTP_200_OK)
+    except Exception as error:
+        return {'is_error': True , "message": str(error)}
 
 @api_view(['GET'])
 def ListarUsuario(request):
@@ -2029,7 +2180,9 @@ def AgregarUsuario(request):
                 RegistrarHistorial(1 , "usuario",key, request.data['key_usuario'], descripcion)
             else:
                 isError = True
-                message = f"error de lectura por lo siguiente: {str(usuarioSerializer.errors)}"
+                message = [str(items[0])  for index ,items in usuarioSerializer.errors.items()][0]
+
+                #message = f"error de lectura por lo siguiente: {menssage[0]}"
 
             return Response({"is_error": isError, "message" : message} ,  status= status.HTTP_200_OK)
     except Exception as error:
@@ -2065,6 +2218,67 @@ def ActualizarUsuario(request , pk=None):
 
     except Exception as error:
         return Response({"is_error": True, "message" : str(error) } , status= status.HTTP_200_OK)
+
+@api_view(['PUT'])
+def ActualizarPerfil(request , id=None):  
+    try:
+        if request.method == 'PUT':
+            isUsuario = Usuario.objects.filter(id = id).first() 
+
+            data  = request.data
+
+            nombre = request.data['first_name']
+            apellido = request.data['last_name']
+            direccion = request.data['direccion']
+            email = request.data['email']
+            sexo = request.data['sexo']
+            numCel = request.data['num_cel']
+            documento = request.data['document_number']
+
+            if isUsuario:
+                usuarioSerializer = UsuarioSerializer(isUsuario , data = data , partial=True)
+                 
+                if usuarioSerializer.is_valid():
+                    dni = isUsuario.document_number
+
+                    if isUsuario.user_type.id in (2 , 3):
+                        isCliente = Cliente.objects.filter(dni = dni)
+                        isVeterinario = Veterinario.objects.filter(dni = dni)
+
+                        if isCliente.exists():
+                            isCliente.update(
+                                dni = documento,
+                                nombre = nombre,
+                                apellido = apellido,
+                                direccion = direccion,
+                                num_cel = numCel,
+                                correo = email,
+                                sexo = sexo
+                            )
+                        
+                        if isVeterinario.exists():
+                            isVeterinario.update(
+                                dni = dni,
+                                nombre = nombre,
+                                apellido = apellido,
+                                direccion = direccion,
+                                num_cel = numCel,
+                                sexo = sexo,
+                                correo = email
+                            )
+                    
+                        usuarioSerializer.save()
+
+                    isError = False
+                    message = "Tu perfil fue actualizada con exito"
+                else:
+                    isError = True
+                    message = f"error de lectura por lo siguiente: {usuarioSerializer.errors}"
+
+                return Response({"is_error": isError, "message" : message} , status= status.HTTP_200_OK)
+    except Exception as error:
+        print(error)
+        return Response({"is_error": True, "message" : error.message} , status= status.HTTP_200_OK)
 
 @api_view(['PUT' , 'DELETE']) 
 def UsuarioEliminacionFisicaLogica(request , pk = None):
@@ -2294,6 +2508,10 @@ def FinalizarCita(request):
 
             isCita = Cita.objects.filter(id = request.data['key_cita'])
 
+            isTriaje = Triaje.objects.filter(key_cita = request.data['key_cita'])
+
+            isReceta = Receta.objects.filter(key_cita = request.data['key_cita'])
+
             if isCita.first():
                 isCita.update(
                     motivo_consulta = request.data['motivo_consulta'],
@@ -2302,25 +2520,37 @@ def FinalizarCita(request):
                     recomendacion = request.data['recomendacion'],
                     key_estado_id = request.data['key_estado']
                 )
-
-                Triaje.objects.create(
-                    key_cita_id = request.data['key_cita'],
-                    peso = request.data['peso'],
-                    temperatura = request.data['temperatura'],
-                    frecuencia_cardica = request.data['frecuencia_cardica'],
-                    frecuencia_respiratoria = request.data['frecuencia_respiratoria']
-                )
-
-                createReceta = Receta.objects.create(
-                    key_cita_id = request.data['key_cita'],
-                )
+                
+                if isTriaje.count() == 0:
+                    Triaje.objects.create(
+                        key_cita_id = request.data['key_cita'],
+                        peso = request.data['peso'],
+                        temperatura = request.data['temperatura'],
+                        frecuencia_cardica = request.data['frecuencia_cardica'],
+                        frecuencia_respiratoria = request.data['frecuencia_respiratoria']
+                    )
+                else:
+                    isTriaje.update(
+                        peso = request.data['peso'],
+                        temperatura = request.data['temperatura'],
+                        frecuencia_cardica = request.data['frecuencia_cardica'],
+                        frecuencia_respiratoria = request.data['frecuencia_respiratoria']
+                    )
+                    
+                if isReceta.count() == 0:
+                    createReceta = Receta.objects.create(
+                        key_cita_id = request.data['key_cita'],
+                    )
+                    keyReceta = createReceta.id
+                else:
+                    keyReceta = isReceta.first().id
 
                 for receta in request.data['receta']:
                     for keyMedicina in receta['id']:
                         Detalle_receta.objects.create(
                             key_medicamento_id = keyMedicina,
                             tratamiento = receta['tratamientos'],
-                            key_receta_id = createReceta.id
+                            key_receta_id = keyReceta
                         )
                     
                 isError = False
@@ -2341,7 +2571,10 @@ def ReporteReceta(request):
             cita = ConsultarCitaId(request.data['key_cita'])
             data = []
             if receta['is_error'] == False and cita['is_error'] == False:
-                return FormatoReceta(cita['data'][0] ,receta['data'])
+                if receta['data'][0]['key_medicina'] != None:
+                    return FormatoReceta(cita['data'][0] ,receta['data'])
+                
+                return Response({'is_error' : True , 'message': 'no se encuentra la receta'} , status=status.HTTP_200_OK)
             else:
                 return Response({'is_error' : True , 'message': 'no se encuentra la receta'} , status=status.HTTP_200_OK)
         except Exception as error:
@@ -2515,10 +2748,10 @@ def ReporteHistorialClinico(request):
             cita = ConsultarCitaId(request.data['key_cita'])
             triaje = ConsultarTriajeId(request.data['key_cita'])
     
-            if receta['is_error'] == False and cita['is_error'] == False:
+            if cita['is_error'] == False:
                 return FormatoHistorialClinicaCita(cita['data'][0] ,receta['data'] , triaje['data'][0])
             else:
-                return Response({'is_error' : True , 'message': 'no se encuentra la receta'} , status=status.HTTP_200_OK)
+                return Response({'is_error' : True , 'message': 'no se encuentra el historial'} , status=status.HTTP_200_OK)
         except Exception as error:
             return Response({'is_error' : True , 'message': str(error)} , status=status.HTTP_200_OK)
 
@@ -2599,8 +2832,13 @@ def FormatoHistorialClinicaCita(data , receta , triaje):
         ]))
         espacio = Paragraph('' , style= style['salto_linea'])
 
+        fecha =  data['fecha_inicio']
+
+        # Formatear la fecha utilizando el filtro date de Django
+        fechaFormateada = date(fecha, 'j \ M\. Y')
+
         tablaDatosGenerales = [
-            [Paragraph(f'<b>Fecha:</b> 15 feb. 2024'.upper() , style= style['texto_general']) , Paragraph(f'<b>Veterinario a cargo:</b> {data["nombre_completo_veterinario"]}'.upper() , style= style['texto_general']), ''],
+            [Paragraph(f'<b>Fecha:</b> {fechaFormateada}'.upper() , style= style['texto_general']) , Paragraph(f'<b>Veterinario a cargo:</b> {data["nombre_completo_veterinario"]}'.upper() , style= style['texto_general']), ''],
             [Paragraph('<b>Datos del paciente</b>'.upper() , style= style['texto_general']) , '', ''],
             [Paragraph(f'<b>Nombre:</b> {data["nombre_mascota"]}'.upper() , style= style['texto_general']) , Paragraph(f'<b>Especie:</b> {data["especie"]}'.upper() , style= style['texto_general']), Paragraph(f'<b>Raza:</b> {data["nombre_raza"]}'.upper() , style= style['texto_general'])],
             [Paragraph(f'<b>edad:</b> {data["edad"]}'.upper() , style= style['texto_general']) , Paragraph(f'<b>Sexo:</b> {data["sexo_mascota"]}'.upper() , style= style['texto_general']),Paragraph('<b>COLOR:</b> ---' ,  style= style['texto_general'])],
@@ -2645,9 +2883,9 @@ def FormatoHistorialClinicaCita(data , receta , triaje):
 
         tablaEstudio = [
             [Paragraph('<b>Estudio del caso</b>'.upper() , style= style['texto_general'])],
-            [Paragraph( data['observacion_sistema'], style= style['texto_general'])],
+            [Paragraph(data['observacion_sistema'] if data['observacion_sistema'] != None else '', style= style['texto_general'])],
             [Paragraph('<b>DIAGNOSTICO</b>'.upper() , style= style['texto_general'])],
-            [Paragraph(data['diagnostico'], style= style['texto_general'])],
+            [Paragraph(data['diagnostico']  if data['diagnostico'] != None  else '', style= style['texto_general'])],
         ]
 
         boderTablaEstudio =  Table(tablaEstudio , colWidths=[(800 * 0.627)])   
@@ -2684,10 +2922,14 @@ def FormatoHistorialClinicaCita(data , receta , triaje):
 
         medicinaAndIndicador = []
         for indicador in datosReceta:
-            medicina = ', '.join(indicador['medicamento'])
-            m = Paragraph(f"<b>{medicina}</b><br/> {indicador['tratamiento']}" , style= style['texto_general'])
-            medicinaAndIndicador.append([m])
-         
+            if indicador['tratamiento'] != None and indicador['medicamento'][0] != None:
+                medicina = ', '.join(indicador['medicamento'])
+                m = Paragraph(f"<b>{medicina}</b><br/> {indicador['tratamiento']}" , style= style['texto_general'])
+                medicinaAndIndicador.append([m])
+            else:
+                m = Paragraph("", style= style['texto_general'])
+                medicinaAndIndicador.append([m])
+
         bordeMedicina = Table(medicinaAndIndicador , colWidths=[(800 * 0.627)])
         
         bordeMedicina.setStyle(TableStyle([
@@ -2695,8 +2937,8 @@ def FormatoHistorialClinicaCita(data , receta , triaje):
         ]))
 
         tablaRecomendacion = [
-            [Paragraph('<b>Estudio del caso</b>'.upper() , style= style['texto_general'])],
-            [Paragraph( data['recomendacion'], style= style['texto_general'])],
+            [Paragraph('<b>Recomendaciones</b>'.upper() , style= style['texto_general'])],
+            [Paragraph(data['recomendacion']  if data['recomendacion'] != None else '', style= style['texto_general'])],
         ]
 
         boderTablaRecomendacion =  Table(tablaRecomendacion , colWidths=[(800 * 0.627)])   
@@ -2740,3 +2982,107 @@ def FormatoHistorialClinicaCita(data , receta , triaje):
     except Exception as error:
         print(error)
         return {'is_error' : True , 'message' : f'no se genero con exito el documento por el siguiente problema: {str(error)}'}
+
+@api_view(['POST'])
+def ResetPassword(request):
+    try:
+        if request.method == 'POST':
+            #ESTABLECEMOS CONEXION CON EL EMAIL
+            asunto = 'Ya puedes restablecer tu contraseña 😇!'
+            mensaje = 'Ya puedes restablecer tu contraseña 😇!'
+            # destinatario = request.data['correo']
+            nombreCampo = request.data['campo']
+            valor = request.data['value']
+
+            isUser = IsVerificarUser(nombreCampo , valor)
+            isValidar = {
+                'username': 'El Usuario no existe',
+                'document_number': 'EL DNI no existe',	
+                'email' : 'El correo electrónico no existe'
+            }[nombreCampo]
+
+            if(isUser['is_error'] == False and len(isUser['result']) != 0):
+                destinatario = isUser['result'][0]['email']
+                caracteres = string.ascii_letters + string.digits
+                token = ''.join(secrets.choice(caracteres) for _ in range(32))
+                link = "http://localhost:5173/reset-password/{0}".format(token)
+
+                codigo = generarCodigo(6)
+            
+                contenidoHtml = render_to_string('reset-password.html', {'link': link , 'nombre_usuario':isUser['result'][0]['first_name'],  'current_year': datetime.now().strftime('%Y') , 'codigo' : codigo})
+                
+                statusCorreo = EnvioCorreo(asunto , mensaje , destinatario , contenidoHtml)
+
+                dateAndTime = timezone.now()
+                idUsuario = isUser['result'][0]['id']
+                if statusCorreo['is_error'] == False:
+                    #si hay un activo actualizar su estado y crear uno nuevo 
+                    isVerificarActivo = RestablerUsuario.objects.filter(Q(key_usuario = idUsuario) and Q(is_activo = True))
+                    
+                    if isVerificarActivo.count() != 0:
+                        isVerificarActivo.update(
+                            is_activo = False
+                        )
+                    RestablerUsuario.objects.create(
+                        key_usuario_id = idUsuario,
+                        toke = token,
+                        codigo_recuperacion = codigo,
+                        expired = dateAndTime + timedelta(days=1) 
+                    )
+                    isError = False
+                    message = 'Revise su Correo Electrónico y abra el enlace que le enviamos par continuar'
+                else:
+                    isError = True
+                    message = 'ups.. Ocurrio un error'
+            else:
+                isError = True
+                message = isValidar
+                token = 0
+
+            return Response({'is_error' : isError , 'message' : message , "token" : token} , status = status.HTTP_200_OK )
+    except Exception as error:
+       print(error)
+       return Response({'is_error' : True , 'message' : error} , status = status.HTTP_200_OK)
+
+
+def generarCodigo(logitud):
+    usedCode = set()
+    
+    while True:
+        codigo = ''.join(random.choices(string.ascii_uppercase + string.digits , k=logitud))
+        
+        if codigo not in usedCode:
+            usedCode.add(codigo)
+            return codigo
+        
+def EnvioCorreo(asunto , mensaje , destinatario , contenidoHtml):
+    try:
+        fromEmail = settings.EMAIL_HOST_USER
+
+        with get_connection(
+            host = settings.EMAIL_HOST,
+            port = settings.EMAIL_PORT,
+            username = settings.EMAIL_HOST_USER,
+            password = settings.EMAIL_HOST_PASSWORD,
+            use_tls = settings.EMAIL_USE_TLS,
+        ) as connection:
+            body = EmailMultiAlternatives(
+                asunto,
+                mensaje,
+                fromEmail,
+                [destinatario],
+                connection= connection
+            )
+
+            body.attach_alternative(contenidoHtml , "text/html")
+
+            if body.send():
+                isError = False
+                message = "Operacion exitosa"
+            else:
+                isError = True 
+                message = 'operacion sin exito'
+
+        return {'is_error': isError , 'message': message}
+    except Exception as error:
+        return {'is_error': True , 'message': error}
