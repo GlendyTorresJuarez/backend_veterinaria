@@ -707,7 +707,7 @@ def TotalClientesNuevos(request):
         message = f"consulta sin exito debido al siguiente problema: {str(error)}"
 
         return  Response({'is_error': isError , 'data': data , "message": message} , status= status.HTTP_200_OK) 
-
+    
 @api_view(['POST'])
 def TotalTiemposReg(request):
     try:
