@@ -9,5 +9,6 @@ xlsxwriter
 requests
 Jinja2
 xhtml2pdf
+django-environ
 Office365-REST-Python-Client
 reportlab

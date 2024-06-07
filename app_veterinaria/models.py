@@ -123,6 +123,7 @@ class Cita(models.Model):
     observacion_sistema = models.TextField(blank = True , null = True)
     diagnostico = models.TextField(blank = True , null = True)
     recomendacion = models.TextField(blank = True , null = True)
+    tiempo_estimado = models.TextField(blank = True , null = True)
 
     class Meta:
         db_table = 'cita'
@@ -210,6 +211,17 @@ class Usuario(AbstractUser):
     
     #AGREGAR MIS CAMPOS AL MODELO SUPER USUARIO
     REQUIRED_FIELDS = ['document_number', 'user_type' , 'status']
+
+class RestablerUsuario(models.Model):
+    key_usuario = models.ForeignKey(Usuario , null=True, blank=True  , on_delete=models.CASCADE)
+    toke = models.TextField(null=True, blank=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    expired  = models.DateTimeField(null=False, blank=False)
+    codigo_recuperacion = models.TextField(null=False, blank=False)
+    is_activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "restablecer_usuario"
 
 class Evento(models.Model):
     nombre = models.TextField(null=True, blank=True)
